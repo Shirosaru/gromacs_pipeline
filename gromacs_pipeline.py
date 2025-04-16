@@ -2,11 +2,15 @@ import os
 import subprocess
 import requests
 import argparse
+import Immunebuilder
 
-# Constants
+
+# 📁 Directory Constants (relative to this script's location)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PDB_DIR = os.path.join(SCRIPT_DIR, "pdbs")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
+IMMUNE_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "immune_output")
+
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
@@ -18,6 +22,28 @@ def run_command(cmd, input=None, cwd=RESULTS_DIR):
         print(f"❌ Error:\n{result.stderr}")
         raise RuntimeError("Command failed")
     return result.stdout
+
+def clean_pdb(input_pdb, output_pdb, keep_water=False):
+    """
+    Cleans a PDB file by removing HETATM entries and keeping only protein ATOM lines.
+
+    Args:
+        input_pdb (str): Path to the input PDB file.
+        output_pdb (str): Path to write the cleaned PDB file.
+        keep_water (bool): If True, keeps water molecules (residue name HOH).
+    """
+    with open(input_pdb, 'r') as f_in, open(output_pdb, 'w') as f_out:
+        for line in f_in:
+            record_type = line[0:6].strip().upper()
+            res_name = line[17:20].strip().upper()
+
+            if record_type == "ATOM":
+                f_out.write(line)
+            elif keep_water and record_type == "HETATM" and res_name == "HOH":
+                f_out.write(line)
+
+    print(f"✅ Cleaned PDB written to {output_pdb}")
+
 
 def download_pdb(pdb_id, outdir=PDB_DIR):
     ensure_dir(outdir)
@@ -57,6 +83,10 @@ def prepare_gromacs_system(pdb_file):
         f.write(f"; TOP file for {base_name}\n")
 
 
+def write_mdp(path, content):
+    with open(path, 'w') as f:
+        f.write(content.strip() + "\n")
+
 def create_mdp_files(work_dir):
     # Energy minimization - first pass
     write_mdp(os.path.join(work_dir, "ions.mdp"), """\
@@ -91,193 +121,130 @@ define          = -DPOSRES
 integrator      = md
 nsteps          = 10000       ; 20 ps warm-up
 dt              = 0.002
-
-; Temperature coupling
 tcoupl          = V-rescale
 tc-grps         = Protein Water_and_ions
 tau_t           = 0.5 0.5
 ref_t           = 100 100
-
-; Constraints
 constraints             = h-bonds
 constraint_algorithm    = lincs
-
-; Cutoffs
 cutoff-scheme           = Verlet
 coulombtype             = PME
 rcoulomb                = 1.0
 rvdw                    = 1.0
-
-; Verlet settings
 verlet-buffer-tolerance = 0.0008
-
-; Periodic Boundary Conditions
 pbc = xyz
-
-; Center of mass motion removal
 comm-mode = Linear
 comm-grps = System
-
-; Output
 nstxout     = 1000
 nstvout     = 1000
 nstenergy   = 1000
 nstlog      = 1000
-
-; Velocity generation
 gen_vel     = yes
 gen_temp    = 100
 gen_seed    = -1
 """)
 
-    # Stable NVT equilibration (updated as per your exact spec)
-    write_mdp(os.path.join(work_dir, "nvt.mdp"), """\
+    # NVT Equilibration (Stable)
+    nvt_mdp = """\
 integrator  = md
 nsteps      = 50000
 dt          = 0.002
-
-; Temperature coupling
 tcoupl      = V-rescale
 tc-grps     = Protein Water_and_ions
 tau_t       = 0.5 0.5
 ref_t       = 300 300
-
-; Constraints
 constraints         = h-bonds
 constraint_algorithm= lincs
-
-; Cutoffs
 cutoff-scheme       = Verlet
 coulombtype         = PME
 rcoulomb            = 1.0
 rvdw                = 1.0
-
-; Verlet settings
 verlet-buffer-tolerance = 0.0008
-
-; Periodic Boundary Conditions
 pbc = xyz
-
-; Center of mass motion removal
 comm-mode = Linear
 comm-grps = System
-
-; Output (minimal for NVT)
 nstxout     = 1000
 nstvout     = 1000
 nstenergy   = 1000
 nstlog      = 1000
-
-; Position restraints
 define = -DPOSRES
-
-; Velocity generation (off by default, only use in warm-up)
 gen_vel = no
 continuation = yes
-""")
+"""
+    write_mdp(os.path.join(work_dir, "nvt.mdp"), nvt_mdp)
+    write_mdp(os.path.join(work_dir, "nvt_300.mdp"), nvt_mdp)
 
-    # NPT Equilibration (slightly tweaked for consistency)
-    write_mdp(os.path.join(work_dir, "npt.mdp"), """\
+    # NPT Equilibration
+    npt_mdp = """\
 title           = NPT Equilibration
 define          = -DPOSRES
 integrator      = md
 nsteps          = 50000
 dt              = 0.002
-
-; Temperature coupling
 tcoupl          = V-rescale
 tc-grps         = Protein Water_and_ions
 tau_t           = 0.5 0.5
 ref_t           = 300 300
-
-; Pressure coupling
 pcoupl          = Parrinello-Rahman
 pcoupltype      = isotropic
 ref_p           = 1.0
 compressibility = 4.5e-5
-
 refcoord_scaling = com              
-
-; Constraints
 constraints             = h-bonds
 constraint_algorithm    = lincs
-
-; Cutoffs
 cutoff-scheme           = Verlet
 coulombtype             = PME
 rcoulomb                = 1.0
 rvdw                    = 1.0
-
-; Verlet settings
 verlet-buffer-tolerance = 0.0008
-
-; Periodic Boundary Conditions
 pbc = xyz
-
-; Center of mass motion removal
 comm-mode = Linear
 comm-grps = System
-
-; Output
 nstxout     = 1000
 nstvout     = 1000
 nstenergy   = 1000
 nstlog      = 1000
-
 continuation = yes
 gen_vel = no
-""")
+"""
+    write_mdp(os.path.join(work_dir, "npt.mdp"), npt_mdp)
+    write_mdp(os.path.join(work_dir, "npt_300.mdp"), npt_mdp)
 
     # Production MD
-    write_mdp(os.path.join(work_dir, "md.mdp"), """\
-; Production MD parameters
+    md_mdp = """\
 integrator              = md
 nsteps                  = 250000         ; 500 ps
 dt                      = 0.002
-
-; Temperature coupling
 tcoupl                  = V-rescale
 tc-grps                 = Protein Water_and_ions
 tau_t                   = 0.5 0.5
 ref_t                   = 300 300
-
-; Pressure coupling
 pcoupl                  = Parrinello-Rahman
 pcoupltype              = isotropic
 ref_p                   = 1.0
 compressibility         = 4.5e-5
-
-; Constraints
 constraints             = h-bonds
 constraint_algorithm    = lincs
-
-; Cutoffs
 cutoff-scheme           = Verlet
 coulombtype             = PME
 rcoulomb                = 1.0
 rvdw                    = 1.0
-
-; Verlet buffer
 verlet-buffer-tolerance = 0.0008
-
-; Periodic boundary conditions
 pbc                     = xyz
-
-; Remove center of mass motion
 comm-mode               = Linear
 comm-grps               = System
-
-; Output control
 nstxout                 = 1000
 nstvout                 = 1000
 nstenergy               = 1000
 nstlog                  = 1000
-
-; Simulation continuation
 continuation            = yes
 gen_vel                 = no
-""")
+"""
+    write_mdp(os.path.join(work_dir, "md.mdp"), md_mdp)
+    write_mdp(os.path.join(work_dir, "md_300.mdp"), md_mdp)
 
+
+'''
 def prepare_gromacs_system(pdb_path, ff="amber99sb-ildn", water="tip3p"):
     base = os.path.splitext(os.path.basename(pdb_path))[0]
     work_dir = os.path.dirname(os.path.abspath(pdb_path))
@@ -341,19 +308,139 @@ def prepare_gromacs_system(pdb_path, ff="amber99sb-ildn", water="tip3p"):
     run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, "md"), "-gpu_id", "0"])
 
     print(f"🎉 MD simulation complete for {base}")
+'''
 
-def main(pdb_ids):
+def edit_mdp(original_mdp, new_mdp, ref_t=None, gen_temp=None, nsteps=None):
+    with open(original_mdp, 'r') as f:
+        lines = f.readlines()
+
+    with open(new_mdp, 'w') as f:
+        for line in lines:
+            if ref_t and "ref_t" in line:
+                f.write(f"ref_t = {ref_t[0]} {ref_t[1]}\n")
+            elif gen_temp and "gen_temp" in line:
+                f.write(f"gen_temp = {gen_temp}\n")
+            elif nsteps and "nsteps" in line:
+                f.write(f"nsteps = {nsteps[0]}\n")
+            else:
+                f.write(line)
+
+def prepare_gromacs_system(pdb_path, temps="300", time=100, ff="amber99sb-ildn", water="tip3p"):
+    avail_temps = ['300', '310', '350', '373', '400']
+    temps = [str(t.strip()) for t in temps.split(',')]
+    base = os.path.splitext(os.path.basename(pdb_path))[0]
+    work_dir = os.path.dirname(os.path.abspath(pdb_path))
+    create_mdp_files(work_dir)
+
+    processed = os.path.join(work_dir, f"{base}_processed.gro")
+    boxed = os.path.join(work_dir, "boxed.gro")
+    solvated = os.path.join(work_dir, "solvated.gro")
+    solv_ions = os.path.join(work_dir, "solv_ions.gro")
+    topol = os.path.join(work_dir, "topol.top")
+
+    # Preprocessing: pdb2gmx -> solvation + ions
+    run_command(["gmx", "pdb2gmx", "-f", pdb_path, "-o", processed, "-p", topol,
+                 "-i", os.path.join(work_dir, "posre.itp"), "-ff", ff, "-water", water, "-ignh"])
+    run_command(["gmx", "editconf", "-f", processed, "-o", boxed, "-c", "-d", "1.0", "-bt", "cubic"])
+    run_command(["gmx", "solvate", "-cp", boxed, "-cs", "spc216.gro", "-p", topol, "-o", solvated])
+    ions_tpr = os.path.join(work_dir, "ions.tpr")
+    run_command(["gmx", "grompp", "-f", os.path.join(work_dir, "ions.mdp"),
+                 "-c", solvated, "-p", topol, "-o", ions_tpr, "-maxwarn", "2"])
+    run_command(["gmx", "genion", "-s", ions_tpr, "-o", solv_ions, "-p", topol,
+                 "-pname", "NA", "-nname", "CL", "-neutral"], input="13\n")
+
+    # Energy minimization
+    em_tpr = os.path.join(work_dir, "em.tpr")
+    run_command(["gmx", "grompp", "-f", os.path.join(work_dir, "minim.mdp"),
+                 "-c", solv_ions, "-p", topol, "-o", em_tpr])
+    run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, "em")])
+
+    # Multi-temperature loop
+    for temp in temps:
+        print(f"\n🔥 Starting simulation at {temp} K")
+
+        # Set filenames
+        nvt_mdp = os.path.join(work_dir, f"nvt_{temp}.mdp")
+        npt_mdp = os.path.join(work_dir, f"npt_{temp}.mdp")
+        md_mdp = os.path.join(work_dir, f"md_{temp}.mdp")
+
+        # Use default MDPs or modify from 300K
+        if temp not in avail_temps:
+            edit_mdp(os.path.join(work_dir, "nvt_300.mdp"), new_mdp=nvt_mdp, ref_t=[temp, temp], gen_temp=temp)
+            edit_mdp(os.path.join(work_dir, "npt_300.mdp"), new_mdp=npt_mdp, ref_t=[temp, temp])
+            edit_mdp(os.path.join(work_dir, "md_300.mdp"), new_mdp=md_mdp, ref_t=[temp, temp])
+        else:
+            # If using standard ones, assume already in place
+            pass
+
+        # Modify MD time if needed
+        if time != 100:
+            steps = int(time * 1000 * 1000 / 2)  # assuming 0.002 ps timestep
+            custom_md_mdp = os.path.join(work_dir, f"md_{temp}_{time}.mdp")
+            edit_mdp(md_mdp, new_mdp=custom_md_mdp, nsteps=[steps])
+            md_mdp = custom_md_mdp
+
+        # NVT
+        nvt_tpr = os.path.join(work_dir, f"nvt_{temp}.tpr")
+        run_command(["gmx", "grompp", "-f", nvt_mdp, "-c", os.path.join(work_dir, "em.gro"),
+                     "-r", os.path.join(work_dir, "em.gro"), "-p", topol, "-o", nvt_tpr])
+        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"nvt_{temp}")])
+
+        # NPT
+        npt_tpr = os.path.join(work_dir, f"npt_{temp}.tpr")
+        run_command(["gmx", "grompp", "-f", npt_mdp, "-c", os.path.join(work_dir, f"nvt_{temp}.gro"),
+                     "-t", os.path.join(work_dir, f"nvt_{temp}.cpt"), "-r", os.path.join(work_dir, f"nvt_{temp}.gro"),
+                     "-p", topol, "-o", npt_tpr, "-maxwarn", "1"])
+        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"npt_{temp}")])
+
+        # MD Production
+        md_tpr = os.path.join(work_dir, f"md_{temp}.tpr")
+        run_command(["gmx", "grompp", "-f", md_mdp,
+                     "-c", os.path.join(work_dir, f"npt_{temp}.gro"),
+                     "-t", os.path.join(work_dir, f"npt_{temp}.cpt"),
+                     "-p", topol, "-o", md_tpr])
+        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"md_{temp}"), "-gpu_id", "0"])
+
+        print(f"✅ Done with {temp} K")
+
+    print(f"\n🎉 All simulations complete for {base}")
+
+
+
+def process_pdbs(pdb_ids):
     ensure_dir(PDB_DIR)
     ensure_dir(RESULTS_DIR)
     for pdb_id in pdb_ids:
         try:
-            pdb_file = download_pdb(pdb_id)
-            prepare_gromacs_system(pdb_file)
+            print(f"\n📦 Processing {pdb_id}...")
+            pdb_file = download_pdb(pdb_id)  # Save as pdbs/XXXX.pdb
+            clean_file = os.path.join(PDB_DIR, f"{pdb_id}_clean.pdb")
+            clean_pdb(pdb_file, clean_file)
+            prepare_gromacs_system(clean_file)
         except Exception as e:
             print(f"❌ Failed for {pdb_id}: {e}")
 
+def process_fasta(fasta_dir):
+    ensure_dir(IMMUNE_OUTPUT_DIR)
+    try:
+        print(f"\n🧬 Running ImmuneBuilder on FASTA files in '{fasta_dir}'...")
+        run_pipeline(fasta_dir, IMMUNE_OUTPUT_DIR)
+        print(f"✅ ImmuneBuilder finished. Output saved in '{IMMUNE_OUTPUT_DIR}'")
+    except Exception as e:
+        print(f"❌ ImmuneBuilder failed: {e}")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GROMACS Full Pipeline Runner")
-    parser.add_argument("--pdbs", nargs="+", required=True, help="List of PDB IDs (e.g. 1HZH 4PE5)")
+    parser = argparse.ArgumentParser(description="GROMACS / ImmuneBuilder Pipeline Runner")
+    parser.add_argument("--pdbs", nargs="+", help="List of PDB IDs (e.g. 1HZH 4PE5)")
+    parser.add_argument("--fasta", type=str, help="Directory containing FASTA files for ImmuneBuilder")
+
     args = parser.parse_args()
-    main(args.pdbs)
+
+    if args.pdbs:
+        process_pdbs(args.pdbs)
+
+    if args.fasta:
+        process_fasta(args.fasta)
+
+    if not args.pdbs and not args.fasta:
+        print("⚠️ Please provide either --pdbs or --fasta to run the pipeline.")
