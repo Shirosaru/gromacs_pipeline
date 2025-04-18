@@ -61,7 +61,7 @@ def run_pipeline(csv_path, output_dir):
             os.remove(tmp_fasta_path)
 
 # === Example usage ===
-csv_input = "/home2/Gromacs/gromacs_pipeline/fasta/paired_sequences.csv"
-pdb_output_dir = "/home2/Gromacs/gromacs_pipeline/fasta/output_pdbs"
+#csv_input = "/home2/Gromacs/gromacs_pipeline/fasta/paired_sequences.csv"
+#pdb_output_dir = "/home2/Gromacs/gromacs_pipeline/fasta/output_pdbs"
 
-run_pipeline(csv_input, pdb_output_dir)
+#run_pipeline(csv_input, pdb_output_dir)
