@@ -12,6 +12,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PDB_DIR = os.path.join(SCRIPT_DIR, "pdbs")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 IMMUNE_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "immune_output")
+AVAILABLE_TEMPS = ['300', '310', '350', '373', '400']
 
 
 def ensure_dir(path):
@@ -85,20 +86,28 @@ def prepare_gromacs_system(pdb_file):
         f.write(f"; TOP file for {base_name}\n")
 
 
-def edit_mdp(original_mdp, new_mdp, ref_t=None, gen_temp=None, nsteps=None):
-    with open(original_mdp, 'r') as f:
+def edit_mdp(source_mdp, new_mdp=None, ref_t=None, gen_temp=None, nsteps=None):
+    """
+    Modifies temperature and/or nsteps in an MDP file.
+    """
+    if new_mdp is None:
+        new_mdp = source_mdp
+
+    with open(source_mdp, 'r') as f:
         lines = f.readlines()
 
-    with open(new_mdp, 'w') as f:
-        for line in lines:
-            if ref_t and "ref_t" in line:
-                f.write(f"ref_t = {ref_t[0]} {ref_t[1]}\n")
-            elif gen_temp and "gen_temp" in line:
-                f.write(f"gen_temp = {gen_temp}\n")
-            elif nsteps and "nsteps" in line:
-                f.write(f"nsteps = {nsteps[0]}\n")
-            else:
-                f.write(line)
+    modified = []
+    for line in lines:
+        if ref_t and line.strip().startswith("ref_t"):
+            line = f"ref_t    = {ref_t[0]} {ref_t[1]}\n"
+        elif gen_temp is not None and line.strip().startswith("gen_temp"):
+            line = f"gen_temp = {gen_temp}\n"
+        elif nsteps is not None and line.strip().startswith("nsteps"):
+            line = f"nsteps = {nsteps}\n"
+        modified.append(line)
+
+    write_mdp(new_mdp, "".join(modified))
+
 
 def canonical_index (pdb):
     from anarci import anarci
@@ -253,18 +262,18 @@ def convert_pkas(pkas, pH):
 
 
 def protonation_state(pdb, pH=7.4):
-    pka_file = os.path.splitext(pdb)[0] + '.pka'
+    pdb_dir = os.path.dirname(os.path.abspath(pdb))
+    pdb_base = os.path.basename(pdb)
+    pka_file = os.path.join(pdb_dir, os.path.splitext(pdb_base)[0] + '.pka')
 
-    # Run PROPKA via CLI
     try:
-        subprocess.run(['propka', pdb, f'--pH={pH}'], check=True)
+        subprocess.run(['propka', pdb_base, f'--pH={pH}'], cwd=pdb_dir, check=True)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"PROPKA failed: {e}")
 
     if not os.path.exists(pka_file):
         raise FileNotFoundError(f"Expected PROPKA output file not found: {pka_file}")
 
-    # Parse pKa results
     pkas = parse_propka(pka_file)
 
     # Remove NME residues
@@ -272,140 +281,114 @@ def protonation_state(pdb, pH=7.4):
 
     return convert_pkas(pkas, pH)
 
-def prepare_gromacs_system(pdb_path, temps="300", time=100, ff="amber99sb-ildn", water="tip3p"):
-
-    '''
-    avail_temps = ['300', '310', '350', '373', '400']
-    temps = [str(t.strip()) for t in temps.split(',')]
-
-    base = os.path.splitext(os.path.basename(pdb_path))[0]
-    work_dir = os.path.join(RESULTS_DIR, base)
-    ensure_dir(work_dir)
-
-    # Copy PDB to the working directory to keep it self-contained
-    local_pdb_path = os.path.join(work_dir, os.path.basename(pdb_path))
-    shutil.copy(pdb_path, local_pdb_path)
-
-    MDP.create_mdp_files(work_dir)
-
-    processed = os.path.join(work_dir, f"{base}_processed.gro")
-    boxed = os.path.join(work_dir, "boxed.gro")
-    solvated = os.path.join(work_dir, "solvated.gro")
-    solv_ions = os.path.join(work_dir, "solv_ions.gro")
-    topol = os.path.join(work_dir, "topol.top")
-
-    # Preprocessing: pdb2gmx -> solvation + ions
-    run_command(["gmx", "pdb2gmx", "-f", pdb_path, "-o", processed, "-p", topol,
-                 "-i", os.path.join(work_dir, "posre.itp"), "-ff", ff, "-water", water, "-ignh"])
-    run_command(["gmx", "editconf", "-f", processed, "-o", boxed, "-c", "-d", "1.0", "-bt", "cubic"])
-    run_command(["gmx", "solvate", "-cp", boxed, "-cs", "spc216.gro", "-p", topol, "-o", solvated])
-    ions_tpr = os.path.join(work_dir, "ions.tpr")
-            run_command(["gmx", "grompp", "-f", os.path.join(work_dir, "ions.mdp"),
-                 "-c", solvated, "-p", topol, "-o", ions_tpr, "-maxwarn", "2"])
-    run_command(["gmx", "genion", "-s", ions_tpr, "-o", solv_ions, "-p", topol,
-                 "-pname", "NA", "-nname", "CL", "-neutral"], input="13\n")    
-    '''
-    
-    avail_temps = ['300', '310', '350', '373', '400']
-    temps = [str(t.strip()) for t in temps.split(',')]
-
-    base = os.path.splitext(os.path.basename(pdb_path))[0]
-    work_dir = os.path.join(RESULTS_DIR, base)
-    ensure_dir(work_dir)
-
-    # Copy PDB to the working directory to keep it self-contained
-    local_pdb_path = os.path.join(work_dir, os.path.basename(pdb_path))
-    shutil.copy(pdb_path, local_pdb_path)
-
-    MDP.create_mdp_files(work_dir)
-
-    processed = os.path.join(work_dir, f"{base}_processed.gro")
-    topol = os.path.join(work_dir, "topol.top")
-
-    # --- Protonation input step (mocked here for structure) ---
-    gromacs_input = protonation_state(pdb=local_pdb_path,  pH=7.0)  # Adjust args.pH as needed
-
-    # Generate processed PDB and GRO using custom protonation input
-    run_command(["gmx", "pdb2gmx", "-f", local_pdb_path, "-o", "processed.pdb", "-p", topol,
-                 "-ff", ff, "-water", water, "-ignh"], input=gromacs_input)
-    run_command(["gmx", "pdb2gmx", "-f", "processed.pdb", "-o", processed, "-p", topol,
-                 "-ff", ff, "-water", water, "-ignh"], input=gromacs_input)
-
-    # --- Create index using canonical_index ---
-    annotation = canonical_index(pdb="processed.pdb")  # Generate annotation from processed PDB
-    run_command(["gmx", "make_ndx", "-f", processed, "-o", "index.ndx"], input=annotation)
-
-    # Continue as before
-    boxed = os.path.join(work_dir, "boxed.gro")
-    solvated = os.path.join(work_dir, "solvated.gro")
-    solv_ions = os.path.join(work_dir, "solv_ions.gro")
-
-    run_command(["gmx", "editconf", "-f", processed, "-o", boxed, "-c", "-d", "1.0", "-bt", "cubic"])
-    run_command(["gmx", "solvate", "-cp", boxed, "-cs", "spc216.gro", "-p", topol, "-o", solvated])
-
-    ions_tpr = os.path.join(work_dir, "ions.tpr")
-    run_command(["gmx", "grompp", "-f", os.path.join(work_dir, "ions.mdp"),
-                 "-c", solvated, "-p", topol, "-o", ions_tpr, "-maxwarn", "2"])
-    run_command(["gmx", "genion", "-s", ions_tpr, "-o", solv_ions, "-p", topol,
-                 "-pname", "NA", "-nname", "CL", "-neutral"], input="13\n")
 
 
+def prepare_gromacs_system(pdb_path, temps=None, time=100, ff="amber99sb-ildn", water="tip3p"):
+    ALLOWED_TEMPS = ['300', '310', '350', '373', '400']
 
-    # Energy minimization
-    em_tpr = os.path.join(work_dir, "em.tpr")
-    run_command(["gmx", "grompp", "-f", os.path.join(work_dir, "minim.mdp"),
-                 "-c", solv_ions, "-p", topol, "-o", em_tpr])
-    run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, "em")])
+    # Handle None or empty input
+    if temps is None or temps.strip().lower() == "all":
+        selected_temps = ALLOWED_TEMPS
+    else:
+        selected_temps = [t.strip() for t in temps.split(',') if t.strip() in ALLOWED_TEMPS]
 
-    # Multi-temperature loop
-    for temp in temps:
-        print(f"\n🔥 Starting simulation at {temp} K")
+    if not selected_temps:
+        raise ValueError(f"No valid temperatures provided. Allowed temperatures: {ALLOWED_TEMPS}")
 
-        # Set filenames
-        nvt_mdp = os.path.join(work_dir, f"nvt_{temp}.mdp")
-        npt_mdp = os.path.join(work_dir, f"npt_{temp}.mdp")
-        md_mdp = os.path.join(work_dir, f"md_{temp}.mdp")
+    base_name = os.path.splitext(os.path.basename(pdb_path))[0]
 
-        # Use default MDPs or modify from 300K
-        if temp not in avail_temps:
-            edit_mdp(os.path.join(work_dir, "nvt_300.mdp"), new_mdp=nvt_mdp, ref_t=[temp, temp], gen_temp=temp)
-            edit_mdp(os.path.join(work_dir, "npt_300.mdp"), new_mdp=npt_mdp, ref_t=[temp, temp])
-            edit_mdp(os.path.join(work_dir, "md_300.mdp"), new_mdp=md_mdp, ref_t=[temp, temp])
-        else:
-            # If using standard ones, assume already in place
-            pass
+    for temp in selected_temps:
+        print(f"\n🔧 Setting up system for {base_name} at {temp}K")
 
-        # Modify MD time if needed
+        run_dir = os.path.join(RESULTS_DIR, base_name, f"{temp}K")
+        ensure_dir(run_dir)
+
+        local_pdb = os.path.join(run_dir, os.path.basename(pdb_path))
+        shutil.copy(pdb_path, local_pdb)
+
+        MDP.create_mdp_files(run_dir)
+
+        try:
+            gmx_input = protonation_state(local_pdb, pH=7.0)
+            gmx_input = "\n".join(gmx_input) if isinstance(gmx_input, list) else gmx_input
+        except Exception as e:
+            print(f"⚠️ Protonation skipped for {base_name} at {temp}K: {e}")
+            gmx_input = ""
+
+        processed_gro = os.path.join(run_dir, f"{base_name}_processed.gro")
+        topol_file = os.path.join(run_dir, "topol.top")
+        boxed_gro = os.path.join(run_dir, "boxed.gro")
+        solvated_gro = os.path.join(run_dir, "solvated.gro")
+        solv_ions_gro = os.path.join(run_dir, "solv_ions.gro")
+        ions_tpr = os.path.join(run_dir, "ions.tpr")
+        em_tpr = os.path.join(run_dir, "em.tpr")
+        em_out = os.path.join(run_dir, "em")
+
+        run_command(["gmx", "pdb2gmx", "-f", local_pdb, "-o", processed_gro, "-p", topol_file,
+                     "-ff", ff, "-water", water, "-ignh"], input=gmx_input, cwd=run_dir)
+
+        run_command(["gmx", "make_ndx", "-f", processed_gro, "-o", "index.ndx"],
+                    input="q\n", cwd=run_dir)
+
+        run_command(["gmx", "editconf", "-f", processed_gro, "-o", boxed_gro, "-c", "-d", "1.0", "-bt", "cubic"],
+                    cwd=run_dir)
+
+        run_command(["gmx", "solvate", "-cp", boxed_gro, "-cs", "spc216.gro", "-p", topol_file, "-o", solvated_gro],
+                    cwd=run_dir)
+
+        run_command(["gmx", "grompp", "-f", os.path.join(run_dir, "ions.mdp"),
+                     "-c", solvated_gro, "-p", topol_file, "-o", ions_tpr, "-maxwarn", "2"], cwd=run_dir)
+
+        run_command(["gmx", "genion", "-s", ions_tpr, "-o", solv_ions_gro, "-p", topol_file,
+                     "-pname", "NA", "-nname", "CL", "-neutral"], input="13\n", cwd=run_dir)
+
+        run_command(["gmx", "grompp", "-f", os.path.join(run_dir, "minim.mdp"),
+                     "-c", solv_ions_gro, "-p", topol_file, "-o", em_tpr], cwd=run_dir)
+
+        run_command(["gmx", "mdrun", "-deffnm", em_out], cwd=run_dir)
+
+        print(f"✅ Energy minimization complete at {temp}K")
+
+        # Customize MDPs for this temperature
+        nvt_300 = os.path.join(run_dir, "nvt_300.mdp")
+        npt_300 = os.path.join(run_dir, "npt_300.mdp")
+        md_300  = os.path.join(run_dir, "md_300.mdp")
+
+        nvt_mdp = os.path.join(run_dir, f"nvt_{temp}.mdp")
+        npt_mdp = os.path.join(run_dir, f"npt_{temp}.mdp")
+        md_mdp  = os.path.join(run_dir, f"md_{temp}.mdp")
+
+        edit_mdp(nvt_300, new_mdp=nvt_mdp, ref_t=[temp, temp], gen_temp=temp)
+        edit_mdp(npt_300, new_mdp=npt_mdp, ref_t=[temp, temp])
+        edit_mdp(md_300,  new_mdp=md_mdp,  ref_t=[temp, temp])
+
         if time != 100:
-            steps = int(time * 1000 * 1000 / 2)  # assuming 0.002 ps timestep
-            custom_md_mdp = os.path.join(work_dir, f"md_{temp}_{time}.mdp")
-            edit_mdp(md_mdp, new_mdp=custom_md_mdp, nsteps=[steps])
-            md_mdp = custom_md_mdp
+            nsteps = int((time * 1_000_000) / 2)
+            md_custom = os.path.join(run_dir, f"md_{temp}_{time}ns.mdp")
+            edit_mdp(md_mdp, new_mdp=md_custom, nsteps=nsteps)
+            md_mdp = md_custom
 
-        # NVT
-        nvt_tpr = os.path.join(work_dir, f"nvt_{temp}.tpr")
-        run_command(["gmx", "grompp", "-f", nvt_mdp, "-c", os.path.join(work_dir, "em.gro"),
-                     "-r", os.path.join(work_dir, "em.gro"), "-p", topol, "-o", nvt_tpr])
-        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"nvt_{temp}")])
+        print(f"📦 Starting NVT at {temp}K")
+        run_command(["gmx", "grompp", "-f", nvt_mdp, "-c", em_out + ".gro", "-r", em_out + ".gro",
+                     "-p", topol_file, "-o", f"nvt_{temp}.tpr"], cwd=run_dir)
+        run_command(["gmx", "mdrun", "-deffnm", f"nvt_{temp}"], cwd=run_dir)
 
-        # NPT
-        npt_tpr = os.path.join(work_dir, f"npt_{temp}.tpr")
-        run_command(["gmx", "grompp", "-f", npt_mdp, "-c", os.path.join(work_dir, f"nvt_{temp}.gro"),
-                     "-t", os.path.join(work_dir, f"nvt_{temp}.cpt"), "-r", os.path.join(work_dir, f"nvt_{temp}.gro"),
-                     "-p", topol, "-o", npt_tpr, "-maxwarn", "1"])
-        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"npt_{temp}")])
+        print(f"📦 Starting NPT at {temp}K")
+        run_command(["gmx", "grompp", "-f", npt_mdp,
+                     "-c", f"nvt_{temp}.gro", "-t", f"nvt_{temp}.cpt",
+                     "-r", f"nvt_{temp}.gro", "-p", topol_file, "-o", f"npt_{temp}.tpr"], cwd=run_dir)
+        run_command(["gmx", "mdrun", "-deffnm", f"npt_{temp}"], cwd=run_dir)
 
-        # MD Production
-        md_tpr = os.path.join(work_dir, f"md_{temp}.tpr")
+        print(f"🚀 Starting MD at {temp}K")
         run_command(["gmx", "grompp", "-f", md_mdp,
-                     "-c", os.path.join(work_dir, f"npt_{temp}.gro"),
-                     "-t", os.path.join(work_dir, f"npt_{temp}.cpt"),
-                     "-p", topol, "-o", md_tpr])
-        run_command(["gmx", "mdrun", "-deffnm", os.path.join(work_dir, f"md_{temp}"), "-gpu_id", "0"])
+                     "-c", f"npt_{temp}.gro", "-t", f"npt_{temp}.cpt",
+                     "-p", topol_file, "-o", f"md_{temp}.tpr"], cwd=run_dir)
+        run_command(["gmx", "mdrun", "-deffnm", f"md_{temp}", "-gpu_id", "0"], cwd=run_dir)
 
-        print(f"✅ Done with {temp} K")
+        print(f"✅ Simulation complete for {base_name} at {temp}K")
 
-    print(f"\n🎉 All simulations complete for {base}")
+    print(f"\n🎉 All simulations completed for {base_name}")
+
 
 
 
@@ -469,3 +452,4 @@ if __name__ == "__main__":
 
     if not args.pdbs and not args.fasta and not args.pdbdir:
         print("⚠️ Please provide at least one of: --pdbs, --pdbdir, or --fasta to run the pipeline.")
+        
